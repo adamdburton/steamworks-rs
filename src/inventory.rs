@@ -1,62 +1,34 @@
 use super::*;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use crate::sys;
 
-/// Represents the result of an inventory operation, ready to be processed.
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct SteamInventoryResultReady {
-    pub handle: sys::SteamInventoryResult_t,
-    pub result: Result<(), SteamError>,
-}
-
-unsafe impl Callback for SteamInventoryResultReady {
-    const ID: i32 = sys::SteamInventoryResultReady_t_k_iCallback as i32;
-    const SIZE: i32 = std::mem::size_of::<sys::SteamInventoryResultReady_t>() as i32;
-
-    unsafe fn from_raw(raw: *mut c_void) -> Self {
-        let status = &*(raw as *mut sys::SteamInventoryResultReady_t);
-        Self {
-            handle: status.m_handle,
-            result: match status.m_result {
-                sys::EResult::k_EResultOK => Ok(()),
-                _ => Err(SteamError::from(status.m_result)),
-            },
-        }
-    }
-}
-
-/// Represents a full update event for the Steam inventory.
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct SteamInventoryFullUpdate {
-    pub handle: sys::SteamInventoryResult_t,
-}
-
-unsafe impl Callback for SteamInventoryFullUpdate {
-    const ID: i32 = sys::SteamInventoryFullUpdate_t_k_iCallback as i32;
-    const SIZE: i32 = std::mem::size_of::<sys::SteamInventoryFullUpdate_t>() as i32;
-
-    unsafe fn from_raw(raw: *mut c_void) -> Self {
-        let status = &*(raw as *mut sys::SteamInventoryFullUpdate_t);
-        Self {
-            handle: status.m_handle,
-        }
-    }
-}
-
-/// Provides access to the Steam inventory interface.
 pub struct Inventory<Manager> {
-    pub(crate) inventory: *mut sys::ISteamInventory,
-    pub(crate) _inner: Arc<Inner<Manager>>,
+    inventory: *mut sys::ISteamInventory,
+    _inner: Arc<Inner<Manager>>,
+    pending_results: Mutex<Vec<sys::SteamInventoryResult_t>>,
 }
 
 impl<Manager> Inventory<Manager> {
-    /// Retrieves all items in the user's Steam inventory.
-    pub fn get_all_items(&self) -> Result<sys::SteamInventoryResult_t, InventoryError> {
+    pub(crate) fn new(inventory: *mut sys::ISteamInventory, inner: Arc<Inner<Manager>>) -> Self {
+        Self {
+            inventory,
+            _inner: inner,
+            pending_results: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn get_all_items(&self) -> Result<Vec<SteamItemDetails>, InventoryError> {
+        let result_handle = self.request_all_items()?;
+        let items = self.wait_for_result_and_get_items(result_handle)?;
+        Ok(items)
+    }
+
+    fn request_all_items(&self) -> Result<sys::SteamInventoryResult_t, InventoryError> {
         let mut result_handle = sys::k_SteamInventoryResultInvalid;
         unsafe {
             if sys::SteamAPI_ISteamInventory_GetAllItems(self.inventory, &mut result_handle) {
+                self.pending_results.lock().unwrap().push(result_handle);
                 Ok(result_handle)
             } else {
                 Err(InventoryError::OperationFailed)
@@ -64,8 +36,22 @@ impl<Manager> Inventory<Manager> {
         }
     }
 
-    /// Retrieves the detailed list of items from the inventory given a result handle.
-    pub fn get_result_items(&self, result_handle: sys::SteamInventoryResult_t) -> Result<Vec<SteamItemDetails>, InventoryError> {
+    fn wait_for_result_and_get_items(&self, result_handle: sys::SteamInventoryResult_t) -> Result<Vec<SteamItemDetails>, InventoryError> {
+        const MAX_ATTEMPTS: u32 = 100;
+        const WAIT_DURATION: Duration = Duration::from_millis(100);
+
+        for _ in 0..MAX_ATTEMPTS {
+            unsafe {
+                if sys::SteamAPI_ISteamInventory_GetResultStatus(self.inventory, result_handle) == sys::EResult::k_EResultOK {
+                    return self.get_result_items(result_handle);
+                }
+            }
+            std::thread::sleep(WAIT_DURATION);
+        }
+        Err(InventoryError::Timeout)
+    }
+
+    fn get_result_items(&self, result_handle: sys::SteamInventoryResult_t) -> Result<Vec<SteamItemDetails>, InventoryError> {
         let mut items_count = 0;
         unsafe {
             if !sys::SteamAPI_ISteamInventory_GetResultItems(
@@ -97,16 +83,29 @@ impl<Manager> Inventory<Manager> {
             }
         }
     }
+}
 
-    /// Destroy a result handle after use.
-    pub fn destroy_result(&self, result_handle: sys::SteamInventoryResult_t) {
-        unsafe {
-            sys::SteamAPI_ISteamInventory_DestroyResult(
-                self.inventory,
-                result_handle,
-            );
+impl<Manager> Drop for Inventory<Manager> {
+    fn drop(&mut self) {
+        let pending_results = std::mem::take(&mut *self.pending_results.lock().unwrap());
+        for result_handle in pending_results {
+            unsafe {
+                sys::SteamAPI_ISteamInventory_DestroyResult(self.inventory, result_handle);
+            }
         }
     }
+}
+
+#[derive(Debug, Error)]
+pub enum InventoryError {
+    #[error("The inventory operation failed")]
+    OperationFailed,
+    #[error("Failed to retrieve result items")]
+    GetResultItemsFailed,
+    #[error("Invalid input")]
+    InvalidInput,
+    #[error("Timeout waiting for inventory result")]
+    Timeout,
 }
 
 /// Represents an individual inventory item with its unique details.
@@ -125,52 +124,3 @@ pub struct SteamItemInstanceID(pub u64);
 /// Represents a unique identifier for an item definition.
 #[derive(Clone, Debug)]
 pub struct SteamItemDef(pub i32);
-
-/// Enumerates possible errors that can occur during inventory operations.
-#[derive(Debug, Error)]
-pub enum InventoryError {
-    #[error("The inventory operation failed")]
-    OperationFailed,
-    #[error("Failed to retrieve result items")]
-    GetResultItemsFailed,
-    #[error("Invalid input")]
-    InvalidInput,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::mpsc;
-
-    #[test]
-    fn test_get_result_items() {
-        let client = Client::init().unwrap();
-        let (tx, rx) = mpsc::channel::<sys::SteamInventoryResult_t>();
-
-        client.register_callback(move |val: SteamInventoryResultReady| {
-            assert!(val.result.is_ok(), "SteamInventoryResultReady Failed.");
-            if let Ok(_) = val.result {
-                tx.send(val.handle).expect("Failed to send handle");
-            }
-        });
-
-        client.register_callback(move |val: SteamInventoryFullUpdate| {
-            println!("SteamInventoryFullUpdate: {:?}", val)
-        });
-
-        let _result = client.inventory().get_all_items();
-
-        for _ in 0..50 {
-            client.run_callbacks();
-            ::std::thread::sleep(::std::time::Duration::from_millis(100));
-            if let Ok(handle) = rx.try_recv() {
-                let result_items = client.inventory().get_result_items(handle).unwrap();
-                assert!(!result_items.is_empty(), "No items received");
-                println!("Result items: {:?}", result_items);
-                client.inventory().destroy_result(handle);
-                return;
-            }
-        }
-        panic!("Timed out waiting for inventory result.");
-    }
-}

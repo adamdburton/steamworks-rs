@@ -448,10 +448,7 @@ where
         unsafe {
             let inventory = sys::SteamAPI_SteamInventory_v003();
             debug_assert!(!inventory.is_null());
-            Inventory {
-                inventory,
-                _inner: self.inner.clone(),
-            }
+            Inventory::new(inventory, self.inner.clone())
         }
     }
 
