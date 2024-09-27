@@ -19,9 +19,6 @@ image = ["dep:image"]
 [workspace]
 members = [
     "./steamworks-sys",
-    "examples/chat-example",
-    "examples/workshop",
-    "examples/lobby",
 ]
 
 [dependencies]
