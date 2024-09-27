@@ -127,4 +127,19 @@ mod tests {
             Err(e) => panic!("Failed to get inventory items: {:?}", e),
         }
     }
+
+    #[test]
+    fn test_consume_item() {
+        let client = Client::init().unwrap();
+        let items = client.inventory().get_all_items().unwrap();
+        if items.is_empty() {
+            panic!("No items in the inventory");
+        }
+
+        let item = &items[0];
+        match client.inventory().consume_item(item.item_id.clone(), 1) {
+            Ok(_) => println!("Item consumed: {:?}", item),
+            Err(e) => panic!("Failed to consume item: {:?}", e),
+        }
+    }
 }
