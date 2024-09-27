@@ -109,6 +109,8 @@ pub enum InventoryError {
     GetResultItemsFailed,
     #[error("Invalid input")]
     InvalidInput,
+    #[error("Timeout")]
+    Timeout,
 }
 
 #[cfg(test)]
