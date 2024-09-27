@@ -68,6 +68,23 @@ impl<Manager> Inventory<Manager> {
             );
         }
     }
+
+    pub fn consume_item(&self, item_id: SteamItemInstanceID, quantity: u32) -> Result<(), InventoryError> {
+        let result_handle = self.internal_consume_item(item_id, quantity)?;
+        self.internal_destroy_result(result_handle);
+        Ok(())
+    }
+
+    fn internal_consume_item(&self, item_id: SteamItemInstanceID, quantity: u32) -> Result<sys::SteamInventoryResult_t, InventoryError> {
+        let mut result_handle = sys::k_SteamInventoryResultInvalid;
+        unsafe {
+            if sys::SteamAPI_ISteamInventory_ConsumeItem(self.inventory, &mut result_handle, item_id.0, quantity) {
+                Ok(result_handle)
+            } else {
+                Err(InventoryError::OperationFailed)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
