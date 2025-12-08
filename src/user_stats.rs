@@ -556,7 +556,7 @@ pub enum LeaderboardDisplayType {
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct Leaderboard(u64);
+pub struct Leaderboard(pub u64);
 
 impl Leaderboard {
     /// Returns the raw 64 bit value of the leaderboard id

@@ -385,6 +385,10 @@ pub enum SteamError {
     /// max network send size
     #[error("WG network send size exceeded")]
     WGNetworkSendExceeded,
+
+    // Returned when the call tp GetItemsWithPrices fails
+    #[error("GetItemsWithPricesFailed failed")]
+    GetItemsWithPricesFailed,
 }
 
 impl From<sys::EResult> for SteamError {

@@ -170,6 +170,146 @@ impl<Manager> Inventory<Manager> {
             }
         }
     }
+
+    /// Initiates a request to retrieve prices for all purchasable items.
+    ///
+    /// The provided callback is invoked once the price request is complete.
+    pub fn request_prices<F>(&self, cb: F)
+    where
+        F: FnOnce(Result<RequestPricesResult, InventoryError>) + 'static + Send,
+    {
+        unsafe {
+            let api_call = sys::SteamAPI_ISteamInventory_RequestPrices(self.inventory);
+
+            // Register the callback for SteamInventoryRequestPricesResult_t
+            register_call_result::<sys::SteamInventoryRequestPricesResult_t, _, _>(
+                &self._inner,
+                api_call,
+                CALLBACK_BASE_ID + 2, // Unique callback ID for request_prices
+                move |v, io_error| {
+                    if io_error {
+                        cb(Err(InventoryError::OperationFailed));
+                    } else {
+                        match v.m_result {
+                            sys::EResult::k_EResultOK => {
+                                let string = CStr::from_ptr(v.m_rgchCurrency.as_ptr())
+                                    .to_string_lossy()
+                                    .into_owned();
+
+                                cb(Ok(RequestPricesResult {
+                                    result: v.m_result as i32,
+                                    currency: string,
+                                }));
+                            }
+                            _ => cb(Err(InventoryError::InvalidSteamResult)),
+                        }
+                    }
+                },
+            );
+        }
+    }
+
+    /// Retrieves the number of items with valid pricing information.
+    ///
+    /// Must be called after a successful `request_prices`.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<u32, InventoryError>` - The number of items with prices or an error.
+    pub fn get_num_items_with_prices(&self) -> Result<u32, InventoryError> {
+        unsafe {
+            let num = sys::SteamAPI_ISteamInventory_GetNumItemsWithPrices(self.inventory);
+            if num > 0 {
+                Ok(num)
+            } else {
+                Err(InventoryError::NoPricesAvailable)
+            }
+        }
+    }
+
+    /// Retrieves the prices for items asynchronously.
+    ///
+    /// This method allocates the necessary arrays internally and passes the results
+    /// to the provided callback.
+    ///
+    /// # Arguments
+    ///
+    /// * `cb` - A closure that takes a `Result<PricesDetailsArray, InventoryError>`.
+    pub fn get_items_with_prices<F>(&self, cb: F)
+    where
+        F: FnOnce(Result<PricesDetailsArray, InventoryError>) + 'static + Send,
+    {
+        // First, retrieve the number of items with prices
+        let num_items = match self.get_num_items_with_prices() {
+            Ok(n) => n,
+            Err(e) => {
+                cb(Err(e));
+                return;
+            }
+        };
+
+        // If there are no items, return an empty array
+        if num_items == 0 {
+            cb(Ok(Vec::new()));
+            return;
+        }
+
+        // Allocate the necessary arrays
+        let mut item_defs: Vec<sys::SteamItemDef_t> = vec![0; num_items as usize];
+        let mut current_prices: Vec<u64> = vec![0; num_items as usize];
+        let mut base_prices: Vec<u64> = vec![0; num_items as usize];
+
+        // Call the Steamworks API to get the prices
+        let success = unsafe {
+            sys::SteamAPI_ISteamInventory_GetItemsWithPrices(
+                self.inventory,
+                item_defs.as_mut_ptr(),
+                current_prices.as_mut_ptr(),
+                base_prices.as_mut_ptr(),
+                num_items,
+            )
+        };
+
+        if !success {
+            cb(Err(InventoryError::GetPricesFailed));
+            return;
+        }
+
+        // Construct the PricesDetailsArray
+        let mut prices = Vec::with_capacity(num_items as usize);
+        for i in 0..num_items as usize {
+            prices.push(PriceDetails {
+                item_def: SteamItemDef(item_defs[i]),
+                current_price: current_prices[i],
+                base_price: base_prices[i],
+            });
+        }
+
+        cb(Ok(prices));
+    }
+}
+
+// Called when a microtransaction authorization response is received
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct SteamInventoryRequestPricesResult {
+    pub m_result: i32,
+    pub m_rgch_currency: String,
+}
+
+unsafe impl Callback for SteamInventoryRequestPricesResult {
+    const ID: i32 = 152;
+    const SIZE: i32 = std::mem::size_of::<sys::SteamInventoryRequestPricesResult_t>() as i32;
+
+    unsafe fn from_raw(raw: *mut c_void) -> Self {
+        let val = &mut *(raw as *mut sys::SteamInventoryRequestPricesResult_t);
+        SteamInventoryRequestPricesResult {
+            m_result: val.m_result as i32,
+            m_rgch_currency: CStr::from_ptr(val.m_rgchCurrency.as_ptr())
+                .to_string_lossy()
+                .into_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -182,6 +322,23 @@ pub enum InventoryError {
     InvalidInput,
     #[error("Timeout waiting for inventory result")]
     Timeout,
+    #[error("Invalid Steam API call result")]
+    InvalidSteamResult,
+    #[error("No prices available")]
+    NoPricesAvailable,
+    #[error("Failed to retrieve prices")]
+    GetPricesFailed,
+}
+
+/// Represents the result of retrieving item prices.
+pub type PricesDetailsArray = Vec<PriceDetails>;
+
+/// Represents pricing details for an individual item.
+#[derive(Clone, Debug)]
+pub struct PriceDetails {
+    pub item_def: SteamItemDef,
+    pub current_price: u64,
+    pub base_price: u64,
 }
 
 /// Represents an individual inventory item with its unique details.
@@ -212,4 +369,10 @@ pub struct SteamItemDef(pub i32);
 pub struct StartPurchaseResult {
     pub order_id: u64,
     pub trans_id: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct RequestPricesResult {
+    pub result: i32,
+    pub currency: String,
 }
